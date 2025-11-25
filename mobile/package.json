@@ -1,0 +1,32 @@
+{
+  "name": "mobile",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.4.0",
+    "axios": "^1.13.2",
+    "buffer": "^6.0.3",
+    "expo": "~54.0.25",
+    "expo-document-picker": "~14.0.7",
+    "expo-file-system": "~19.0.19",
+    "expo-gl": "~16.0.7",
+    "expo-status-bar": "~3.0.8",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-safe-area-context": "^5.6.2",
+    "react-native-web": "^0.21.0",
+    "three": "0.166.1"
+  },
+  "overrides": {
+    "three": "0.166.1"
+  },
+  "private": true
+}
