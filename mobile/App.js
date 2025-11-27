@@ -35,6 +35,8 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(0);
+  const [assetsLoaded, setAssetsLoaded] = useState(false);
+  const stepLoaderRef = React.useRef(null);
 
   // Step Loader State
   const [stepFileContent, setStepFileContent] = useState(null);
@@ -106,9 +108,11 @@ export default function App() {
       console.log("✅ Assets Loaded. ThreeJS Size:", threeCode ? threeCode.length : "EMPTY");
       console.log("✅ OrbitControls Size:", orbitControlsCode ? orbitControlsCode.length : "EMPTY");
       console.log('✅ All assets loaded successfully!');
+      setAssetsLoaded(true);
     } catch (error) {
       console.error('❌ Asset loading error:', error);
       Alert.alert('Asset Loading Error', error.message);
+      setAssetsLoaded(false);
     }
   };
 
@@ -144,13 +148,21 @@ export default function App() {
 
         try {
           // Read file as Base64
-          const base64 = await FileSystem.readAsStringAsync(file.uri, {
+          let base64 = await FileSystem.readAsStringAsync(file.uri, {
             encoding: 'base64',
           });
+
+          console.log('📤 File (' + file.name + ') size:', base64.length);
 
           setLoadingProgress(30);
           setStepFileName(file.name);
           setStepFileContent(base64);
+          setLoadingProgress(60);
+
+          // CRITICAL FIX: FREE MEMORY IMMEDIATELY
+          // If we don't do this, the string stays in RAM and blocks the next load
+          base64 = null;
+          console.log('🧹 Base64 string cleared from memory');
 
           // Determine file type for the loader
           let fileType = 'step';
@@ -191,11 +203,34 @@ export default function App() {
     }
   };
 
-  const handleStepLoaded = (meshData) => {
+  const handleStepLoaded = (partsData) => {
     setLoadingProgress(90);
-    // addObjectToScene(stepFileName, null, meshData); // Optional: Keep for metadata if needed
-    setLoadingProgress(100);
-    setLoading(false);
+
+    // Populate objects state with loaded parts
+    if (partsData && Array.isArray(partsData)) {
+      const newObjects = partsData.map(part => ({
+        id: part.id,  // UUID from WebView
+        name: part.name || stepFileName || 'Imported Part',
+        url: 'webview',
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        color: part.color || '#555555',
+        visible: part.visible !== undefined ? part.visible : true,
+        showEdges: false
+      }));
+
+      setObjects(newObjects);
+      if (newObjects.length > 0) {
+        setSelectedId(newObjects[0].id);
+      }
+      console.log('✅ Loaded', newObjects.length, 'parts to sidebar');
+    }
+
+    setTimeout(() => {
+      setLoadingProgress(100);
+      setLoading(false);
+      setLoadingProgress(0);
+    }, 300);
     // DO NOT RESET CONTENT - Keep StepLoader mounted!
     // setStepFileContent(null); 
     // setStepFileName(null);
@@ -243,6 +278,19 @@ export default function App() {
   };
 
   const handleUpdateObject = (id, updates) => {
+    // Send message to WebView for color/visibility updates
+    if (stepLoaderRef.current && (updates.color || updates.visible !== undefined)) {
+      const changes = {};
+      if (updates.color) changes.color = updates.color;
+      if (updates.visible !== undefined) changes.visible = updates.visible;
+
+      stepLoaderRef.current.postMessage(JSON.stringify({
+        type: 'UPDATE_OBJECT',
+        id: id,
+        changes: changes
+      }));
+    }
+
     setObjects((prev) =>
       prev.map((obj) => (obj.id === id ? { ...obj, ...updates } : obj))
     );
@@ -264,6 +312,13 @@ export default function App() {
   };
 
   const handleDeleteObject = (id) => {
+    // Send message to WebView to remove object
+    if (stepLoaderRef.current) {
+      stepLoaderRef.current.postMessage(JSON.stringify({
+        type: 'REMOVE_OBJECT',
+        id: id
+      }));
+    }
     setObjects((prev) => prev.filter((obj) => obj.id !== id));
     if (selectedId === id) {
       setSelectedId(null);
@@ -272,6 +327,13 @@ export default function App() {
 
   const handleResetPosition = (id) => {
     if (!id) return;
+    // Send message to WebView to reset object
+    if (stepLoaderRef.current) {
+      stepLoaderRef.current.postMessage(JSON.stringify({
+        type: 'RESET_OBJECT',
+        id: id
+      }));
+    }
     handleUpdateObject(id, { position: [0, 0, 0], rotation: [0, 0, 0] });
   };
 
@@ -286,6 +348,17 @@ export default function App() {
       if (prevMode === "shaded") nextMode = "edges";
       else if (prevMode === "edges") nextMode = "wireframe";
       else nextMode = "shaded";
+
+      // Determine mode for WebView (solid or wireframe)
+      const webViewMode = nextMode === "wireframe" ? "wireframe" : "solid";
+
+      // Send message to WebView
+      if (stepLoaderRef.current) {
+        stepLoaderRef.current.postMessage(JSON.stringify({
+          type: 'SET_VIEW_MODE',
+          mode: webViewMode
+        }));
+      }
 
       if (nextMode === "wireframe") {
         // Switching TO Wireframe: Save color and set to Black
@@ -348,8 +421,9 @@ export default function App() {
 
       <View style={styles.viewerContainer}>
         {/* StepLoader is now the primary and only 3D renderer */}
-        {stepFileContent && threeJsCode ? (
+        {assetsLoaded ? (
           <StepLoader
+            ref={stepLoaderRef}
             fileContent={stepFileContent}
             fileType={stepFileType}
             qualityMode={qualityMode}
@@ -467,6 +541,17 @@ export default function App() {
             )}
           </TouchableOpacity>
         </View>
+
+        {/* Loading Overlay - Full screen overlay during import */}
+        {loading && (
+          <View style={styles.loadingOverlay}>
+            <View style={styles.loadingCard}>
+              <ActivityIndicator size="large" color="#3b82f6" />
+              <Text style={styles.loadingText}>Loading Model...</Text>
+              <Text style={styles.loadingProgressText}>{Math.round(loadingProgress)}%</Text>
+            </View>
+          </View>
+        )}
       </View>
 
       {/* Overlay to close sidebar on outside tap */}
@@ -505,7 +590,17 @@ export default function App() {
           viewMode={viewMode}
           onCycleViewMode={handleCycleViewMode}
           showGrid={showGrid}
-          onToggleGrid={() => setShowGrid(!showGrid)}
+          onToggleGrid={() => {
+            const newShowGrid = !showGrid;
+            setShowGrid(newShowGrid);
+            // Send message to WebView
+            if (stepLoaderRef.current) {
+              stepLoaderRef.current.postMessage(JSON.stringify({
+                type: 'TOGGLE_GRID',
+                value: newShowGrid
+              }));
+            }
+          }}
           showViewSelector={showViewSelector}
           onToggleViewSelector={() => setShowViewSelector(!showViewSelector)}
           onResetPosition={handleResetPosition}
@@ -624,6 +719,39 @@ const styles = StyleSheet.create({
     color: "#000",
     fontWeight: "bold",
     fontSize: 16,
+  },
+  loadingOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0, 0, 0, 0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 40,
+  },
+  loadingCard: {
+    backgroundColor: "white",
+    borderRadius: 20,
+    padding: 30,
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  loadingText: {
+    marginTop: 15,
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#333",
+  },
+  loadingProgressText: {
+    marginTop: 8,
+    fontSize: 14,
+    color: "#666",
   },
   sidebarContainer: {
     position: "absolute",
