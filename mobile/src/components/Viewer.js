@@ -22,33 +22,71 @@ const MeshObject = ({
     showEdges,
     setRef,
     viewMode,
+    rawMesh,
 }) => {
     // Detect file type
     const fileType = useMemo(() => {
+        if (rawMesh) return 'custom';
         const urlLower = url.toLowerCase();
         if (urlLower.endsWith('.obj')) return 'obj';
         if (urlLower.endsWith('.ply')) return 'ply';
         return 'stl';
-    }, [url]);
+    }, [url, rawMesh]);
 
     // Load the file
     const loadedData = useLoader(
         fileType === 'obj' ? OBJLoader :
             fileType === 'ply' ? PLYLoader :
-                STLLoader,
-        url
+                fileType === 'custom' ? () => null : // Dummy loader for custom
+                    STLLoader,
+        fileType === 'custom' ? null : url
     );
 
     // Prepare for rendering
     const meshData = useMemo(() => {
-        if (fileType === 'obj') {
+        if (fileType === 'custom') {
+            // rawMesh is expected to be an array of mesh objects from occt-import-js
+            // or a single mesh object.
+            // Structure: { attributes: { position: { array: [] }, normal: { array: [] } }, index: { array: [] } }
+
+            if (!rawMesh) return null;
+
+            let meshes = [];
+            if (rawMesh.meshes) {
+                meshes = rawMesh.meshes;
+            } else if (Array.isArray(rawMesh)) {
+                meshes = rawMesh;
+            } else {
+                meshes = [rawMesh];
+            }
+
+            const group = new THREE.Group();
+
+            meshes.forEach((meshData) => {
+                const geometry = new THREE.BufferGeometry();
+                if (meshData.attributes.position) {
+                    geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.attributes.position.array, 3));
+                }
+                if (meshData.attributes.normal) {
+                    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(meshData.attributes.normal.array, 3));
+                }
+                if (meshData.index) {
+                    geometry.setIndex(Array.from(meshData.index.array));
+                }
+
+                const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color }));
+                group.add(mesh);
+            });
+
+            return { type: 'obj', group }; // Treat as group like OBJ
+        } else if (fileType === 'obj') {
             // OBJ files can have multiple parts - use the whole group
             return { type: 'obj', group: loadedData };
         } else {
             // STL/PLY return geometry directly
             return { type: 'geometry', geometry: loadedData };
         }
-    }, [loadedData, fileType]);
+    }, [loadedData, fileType, rawMesh, color]);
 
     const meshRef = useRef();
     const timerRef = useRef(null);
@@ -436,157 +474,7 @@ const Viewer = ({
         }
     };
 
-    return (
-        <View
-            ref={viewRef}
-            style={{ flex: 1, backgroundColor: isDark ? "#1a1a1a" : "#f0f0f0" }}
-            onLayout={handleLayout}
-        >
-            <Canvas
-                camera={{ position: [50, 50, 50], fov: 50, near: 0.1, far: 10000 }}
-                onPointerMissed={() => {
-                    // Deselect or exit transform mode on background click
-                    setTransformMode(false);
-                    onSelect(null);
-                }}
-            >
-                <DomElementPatcher layout={layout} />
-                <ambientLight intensity={0.5} />
-                <pointLight position={[100, 100, 100]} intensity={1} />
-                <pointLight position={[-100, -100, -100]} intensity={0.5} />
 
-                {showGrid && (
-                    <Grid
-                        infiniteGrid
-                        fadeDistance={sceneBounds ? Math.max(sceneBounds.getSize(new THREE.Vector3()).length() * 5, 1000) : 1000}
-                        cellSize={sceneBounds ? Math.max(sceneBounds.getSize(new THREE.Vector3()).length() / 10, 1) : 1}
-                        sectionSize={sceneBounds ? Math.max(sceneBounds.getSize(new THREE.Vector3()).length() / 2, 10) : 10}
-                        sectionColor={isDark ? "#444" : "#ccc"}
-                        cellColor={isDark ? "#222" : "#ddd"}
-                    />
-                )}
-
-                {showOrigin && (
-                    <mesh position={[0, 0, 0]}>
-                        <sphereGeometry args={[0.5, 16, 16]} />
-                        <meshBasicMaterial color="#000000" />
-                    </mesh>
-                )}
-
-                <ZoomToFit
-                    objects={objects}
-                    meshRefs={meshRefs}
-                    controlsRef={controlsRef}
-                    onBoundsCalculated={setSceneBounds}
-                    enabled={!isTransitioning && !viewSelectorUsed}
-                />
-
-                {objects.map((obj) => (
-                    <MeshObject
-                        key={obj.id}
-                        {...obj}
-                        isSelected={obj.id === selectedId}
-                        onSelect={onSelect}
-                        onLongPress={handleLongPress}
-                        setRef={setRef}
-                        viewMode={viewMode}
-                    />
-                ))}
-
-                {showViewSelector && (
-                    <ViewSelector
-                        box={sceneBounds}
-                        onSelect={(direction) => {
-                            if (controlsRef.current && sceneBounds) {
-                                const center = new THREE.Vector3();
-                                sceneBounds.getCenter(center);
-
-                                // Calculate proper distance to fit the model
-                                const sphere = new THREE.Sphere();
-                                sceneBounds.getBoundingSphere(sphere);
-                                const radius = sphere.radius;
-
-                                const camera = controlsRef.current.object;
-                                const fov = camera.fov * (Math.PI / 180);
-                                const aspect = camera.aspect || 1;
-
-                                // Distance for vertical fit
-                                let distanceV = radius / Math.sin(fov / 2);
-                                // Distance for horizontal fit
-                                let distanceH = radius / (Math.tan(fov / 2) * aspect);
-                                // Use the larger distance and add padding
-                                let distance = Math.max(distanceV, distanceH) * 1.2;
-                                distance = Math.max(distance, 10); // Ensure minimum distance
-
-                                const newPos = direction.clone().multiplyScalar(distance).add(center);
-
-                                setIsTransitioning(true);
-                                setViewSelectorUsed(true);  // Mark that view selector was used
-                                setCameraTarget({
-                                    position: newPos,
-                                    lookAt: center,
-                                });
-
-                                // Auto-hide ViewSelector after selection (SolidWorks style)
-                                if (onViewSelect) {
-                                    onViewSelect();
-                                }
-                            }
-                        }}
-                    />
-                )}
-
-                {cameraTarget && (
-                    <CameraTransition
-                        controlsRef={controlsRef}
-                        targetPosition={cameraTarget.position}
-                        targetLookAt={cameraTarget.lookAt}
-                        onComplete={() => {
-                            setCameraTarget(null);
-                            setIsTransitioning(false);
-                        }}
-                    />
-                )}
-
-                {selectedId && transformMode && meshRefs.current[selectedId] && (
-                    <Gizmo
-                        position={meshRefs.current[selectedId].position.toArray()}
-                        onDragStart={() => {
-                            if (controlsRef.current) controlsRef.current.enabled = false;
-                        }}
-                        onDragEnd={() => {
-                            if (controlsRef.current) controlsRef.current.enabled = true;
-                        }}
-                        onUpdate={(newPos) => {
-                            if (onUpdateObject) {
-                                onUpdateObject(selectedId, { position: newPos });
-                            }
-                        }}
-                    />
-                )}
-
-                <OrbitControls
-                    ref={controlsRef}
-                    makeDefault
-                    enabled={!transformMode}
-                    minDistance={10}
-                    maxDistance={5000}
-                    enableZoom={false}
-                    enablePan={false}
-                    enableRotate={true}
-                    enableDamping={true}  // Disable inertia/momentum when rotating.
-                    dampingFactor={0.1}  // Adjust damping factor for smooth rotation.
-                    touches={{
-                        ONE: panMode ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE,
-                        TWO: THREE.TOUCH.PAN,
-                    }}
-                    onStart={() => {
-                        if (cameraTarget) setCameraTarget(null);
-                    }}
-                />
-            </Canvas>
-        </View >
-    );
 };
 
 export default Viewer;

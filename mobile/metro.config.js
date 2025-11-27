@@ -1,19 +1,22 @@
 const { getDefaultConfig } = require('expo/metro-config');
 
-
 const config = getDefaultConfig(__dirname);
 
-// Add 'cjs' to sourceExts for Three.js and other libraries
-config.resolver.sourceExts.push('cjs');
+// 1. Add 'wasm', 'stl', 'step', 'igs' to the list of assets
+config.resolver.assetExts.push(
+    'wasm',
+    'stl',
+    'obj',
+    'stp',
+    'step',
+    'igs',
+    'iges',
+    'gltf',
+    'glb',
+    'ply'
+);
 
-const path = require('path');
-
-// Force resolution of 'three', 'react', and 'react-native' to the one in root node_modules
-config.resolver.extraNodeModules = {
-    ...config.resolver.extraNodeModules,
-    three: path.resolve(__dirname, 'node_modules/three'),
-    react: path.resolve(__dirname, 'node_modules/react'),
-    'react-native': path.resolve(__dirname, 'node_modules/react-native'),
-};
+// 2. Ensure .txt is treated as an asset (for renamed JS libraries)
+config.resolver.assetExts.push('txt');
 
 module.exports = config;

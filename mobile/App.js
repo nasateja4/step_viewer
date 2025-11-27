@@ -1,5 +1,5 @@
 import "./polyfills";
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   StyleSheet,
   View,
@@ -14,10 +14,12 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system";
-import Viewer from "./src/components/Viewer";
+import * as FileSystem from "expo-file-system/legacy";
+import { Asset } from "expo-asset";
 import MinimalViewer from "./src/components/MinimalViewer";
 import Sidebar from "./src/components/Sidebar";
+
+import StepLoader from "./src/components/StepLoader";
 
 // Replace with your computer's IP address if running on device
 // For Android Emulator, 10.0.2.2 points to host localhost
@@ -34,10 +36,86 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(0);
 
+  // Step Loader State
+  const [stepFileContent, setStepFileContent] = useState(null);
+  const [stepFileName, setStepFileName] = useState(null);
+  const [stepFileType, setStepFileType] = useState('step');
+
+  // Quality Mode: 'draft' or 'high'
+  const [qualityMode, setQualityMode] = useState('high');
+
+  // Asset libraries (loaded once on mount)
+  const [threeJsCode, setThreeJsCode] = useState('');
+  const [stlLoaderCode, setStlLoaderCode] = useState('');
+  const [objLoaderCode, setObjLoaderCode] = useState('');
+  const [gltfLoaderCode, setGltfLoaderCode] = useState('');
+  const [orbitControlsCode, setOrbitControlsCode] = useState('');
+  const [occtWasmBase64, setOcctWasmBase64] = useState('');
+
+  // Load assets on mount
+  useEffect(() => {
+    loadAssets();
+  }, []);
+
+  const loadAssets = async () => {
+    try {
+      // Load Three.js library (renamed to .txt to avoid Metro compilation)
+      const threeAsset = Asset.fromModule(require('./assets/three.min.txt'));
+      await threeAsset.downloadAsync();
+      const threeCode = await FileSystem.readAsStringAsync(threeAsset.localUri, {
+        encoding: 'utf8'
+      });
+      setThreeJsCode(threeCode);
+
+      const stlAsset = Asset.fromModule(require('./assets/STLLoader.txt'));
+      await stlAsset.downloadAsync();
+      const stlCode = await FileSystem.readAsStringAsync(stlAsset.localUri, {
+        encoding: 'utf8'
+      });
+      setStlLoaderCode(stlCode);
+
+      const objAsset = Asset.fromModule(require('./assets/OBJLoader.txt'));
+      await objAsset.downloadAsync();
+      const objCode = await FileSystem.readAsStringAsync(objAsset.localUri, {
+        encoding: 'utf8'
+      });
+      setObjLoaderCode(objCode);
+
+      const gltfAsset = Asset.fromModule(require('./assets/GLTFLoader.txt'));
+      await gltfAsset.downloadAsync();
+      const gltfCode = await FileSystem.readAsStringAsync(gltfAsset.localUri, {
+        encoding: 'utf8'
+      });
+      setGltfLoaderCode(gltfCode);
+
+      const orbitControlsAsset = Asset.fromModule(require('./assets/OrbitControls.txt'));
+      await orbitControlsAsset.downloadAsync();
+      const orbitControlsCode = await FileSystem.readAsStringAsync(orbitControlsAsset.localUri, {
+        encoding: 'utf8'
+      });
+      setOrbitControlsCode(orbitControlsCode);
+
+      // WASM file keeps its original extension
+      const wasmAsset = Asset.fromModule(require('./assets/occt-import-js.wasm'));
+      await wasmAsset.downloadAsync();
+      const wasmBase64 = await FileSystem.readAsStringAsync(wasmAsset.localUri, {
+        encoding: 'base64'
+      });
+      setOcctWasmBase64(wasmBase64);
+
+      console.log("✅ Assets Loaded. ThreeJS Size:", threeCode ? threeCode.length : "EMPTY");
+      console.log("✅ OrbitControls Size:", orbitControlsCode ? orbitControlsCode.length : "EMPTY");
+      console.log('✅ All assets loaded successfully!');
+    } catch (error) {
+      console.error('❌ Asset loading error:', error);
+      Alert.alert('Asset Loading Error', error.message);
+    }
+  };
+
   const handleImport = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: "*/*", // Allow all types, we'll filter or let backend handle
+        type: "*/*",
         copyToCacheDirectory: true,
       });
 
@@ -46,73 +124,54 @@ export default function App() {
       const file = result.assets[0];
       const fileName = file.name.toLowerCase();
 
-      // Check file types
+      // Enhanced file type detection
       const isStep = fileName.endsWith(".step") || fileName.endsWith(".stp");
+      const isIges = fileName.endsWith(".iges") || fileName.endsWith(".igs");
       const isStl = fileName.endsWith(".stl");
       const isObj = fileName.endsWith(".obj");
+      const isGltf = fileName.endsWith(".gltf") || fileName.endsWith(".glb");
       const isPly = fileName.endsWith(".ply");
 
-      // Formats that load directly on mobile (no server)
-      const isDirectLoad = isStl || isObj || isPly;
+      // Formats that use the new WebView-based loader
+      const usesWebViewLoader = isStep || isIges || isStl || isObj || isGltf;
 
-      if (isStep) {
+      // Formats that load directly on mobile (legacy support)
+      const isDirectLoad = isPly;
+
+      if (usesWebViewLoader) {
         setLoading(true);
-        setLoadingProgress(0);
-        // Upload to backend
-        const formData = new FormData();
-        formData.append("file", {
-          uri: file.uri,
-          name: file.name,
-          type: file.mimeType || "application/octet-stream",
-        });
+        setLoadingProgress(10);
 
         try {
-          const response = await fetch(`${BACKEND_URL}/convert`, {
-            method: "POST",
-            body: formData,
-            headers: {
-              "Content-Type": "multipart/form-data",
-            },
+          // Read file as Base64
+          const base64 = await FileSystem.readAsStringAsync(file.uri, {
+            encoding: 'base64',
           });
 
           setLoadingProgress(30);
+          setStepFileName(file.name);
+          setStepFileContent(base64);
 
-          if (!response.ok) {
-            throw new Error(`Conversion failed: ${response.statusText}`);
-          }
+          // Determine file type for the loader
+          let fileType = 'step';
+          if (isIges) fileType = 'iges';
+          else if (isStl) fileType = 'stl';
+          else if (isObj) fileType = 'obj';
+          else if (isGltf) fileType = fileName.endsWith('.glb') ? 'glb' : 'gltf';
 
-          setLoadingProgress(60);
+          setStepFileType(fileType);
+          // The StepLoader component will pick this up and process it
 
-          // Get blob and save to file
-          const blob = await response.blob();
-
-          // Convert blob to base64
-          const reader = new FileReader();
-          reader.readAsDataURL(blob);
-          reader.onloadend = async () => {
-            const base64data = reader.result.split(",")[1];
-            const filename = `converted_${Date.now()}.stl`;
-            const fileUri = FileSystem.documentDirectory + filename;
-
-            await FileSystem.writeAsStringAsync(fileUri, base64data, {
-              encoding: FileSystem.EncodingType.Base64,
-            });
-
-            setLoadingProgress(90);
-            addObjectToScene(file.name, fileUri);
-            setLoadingProgress(100);
-            setLoading(false);
-          };
         } catch (err) {
-          console.error("Upload error:", err);
-          Alert.alert("Error", "Failed to convert file. Check backend connection.");
+          console.error("File read error:", err);
+          Alert.alert("Error", "Failed to read file locally.");
           setLoading(false);
-          setLoadingProgress(0);
         }
+
       } else if (isDirectLoad) {
         setLoading(true);
         setLoadingProgress(50);
-        // Direct load for STL, OBJ, PLY
+        // Direct load for PLY (legacy)
         addObjectToScene(file.name, file.uri);
         setLoadingProgress(100);
         setTimeout(() => {
@@ -122,7 +181,7 @@ export default function App() {
       } else {
         Alert.alert(
           "Unsupported File",
-          "Please select: .step/.stp, .stl, .obj, or .ply file."
+          "Supported formats:\n.step, .stp, .iges, .igs\n.stl, .obj, .gltf, .glb, .ply"
         );
       }
     } catch (err) {
@@ -132,11 +191,30 @@ export default function App() {
     }
   };
 
-  const addObjectToScene = (name, uri) => {
+  const handleStepLoaded = (meshData) => {
+    setLoadingProgress(90);
+    // addObjectToScene(stepFileName, null, meshData); // Optional: Keep for metadata if needed
+    setLoadingProgress(100);
+    setLoading(false);
+    // DO NOT RESET CONTENT - Keep StepLoader mounted!
+    // setStepFileContent(null); 
+    // setStepFileName(null);
+  };
+
+  const handleStepError = (error) => {
+    console.error("STEP Loader Error:", error);
+    Alert.alert("Error", "Failed to load STEP file: " + error);
+    setLoading(false);
+    setStepFileContent(null);
+    setStepFileName(null);
+  };
+
+  const addObjectToScene = (name, uri, rawMesh = null) => {
     const newObj = {
       id: `obj_${Date.now()}`,
       name: name,
-      url: uri,
+      url: uri || "custom", // Use dummy URL if rawMesh is present
+      rawMesh: rawMesh,
       position: [0, 0, 0],
       rotation: [0, 0, 0],
       color: "#cccccc",
@@ -269,112 +347,126 @@ export default function App() {
       />
 
       <View style={styles.viewerContainer}>
-        <Viewer
-          objects={objects}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          matingCmd={matingCmd}
-          onMatingComplete={handleMatingComplete}
-          onUpdateObject={handleUpdateObject}
-          panMode={panMode}
-          zoomCmd={zoomCmd}
-          theme={theme}
-          viewMode={viewMode}
-          showGrid={showGrid}
-          showViewSelector={showViewSelector}
-          showOrigin={showOrigin}
-          onViewSelect={() => setShowViewSelector(false)}
-        />
+        {/* StepLoader is now the primary and only 3D renderer */}
+        {stepFileContent && threeJsCode ? (
+          <StepLoader
+            fileContent={stepFileContent}
+            fileType={stepFileType}
+            qualityMode={qualityMode}
+            threeJsCode={threeJsCode}
+            stlLoaderCode={stlLoaderCode}
+            objLoaderCode={objLoaderCode}
+            gltfLoaderCode={gltfLoaderCode}
+            orbitControlsCode={orbitControlsCode}
+            occtWasmBase64={occtWasmBase64}
+            onModelLoaded={handleStepLoaded}
+            onError={handleStepError}
+          />
+        ) : (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <ActivityIndicator size="large" color="#0000ff" />
+            <Text style={{ marginTop: 10 }}>Initializing 3D Engine...</Text>
+          </View>
+        )}
 
-        {/* Top Left Menu Button */}
-        <TouchableOpacity
-          style={[
-            styles.menuButton,
-            { backgroundColor: isDark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)" },
-          ]}
-          onPress={toggleSidebar}
-        >
-          <Text style={[styles.menuButtonText, { color: isDark ? "white" : "black" }]}>
-            ☰
-          </Text>
-        </TouchableOpacity>
-
-        {/*Origin Toggle Button (below menu) */}
-        <TouchableOpacity
-          style={[
-            styles.originButton,
-            { backgroundColor: isDark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)" },
-            showOrigin && { backgroundColor: isDark ? "rgba(100, 150, 255, 0.4)" : "rgba(100, 150, 255, 0.3)" },
-          ]}
-          onPress={() => setShowOrigin(!showOrigin)}
-        >
-          <Text style={[styles.originButtonText, { color: isDark ? "white" : "black" }]}>
-            ⌖
-          </Text>
-        </TouchableOpacity>
-
-        {/* View Controls (Zoom & Pan) */}
-        <View style={styles.viewControls}>
+        {/* UI Overlay - Absolute positioned to float on top, pointer-events box-none lets touches pass through */}
+        <View style={styles.uiOverlay} pointerEvents="box-none">
+          {/* Top Left Menu Button */}
           <TouchableOpacity
             style={[
-              styles.controlButton,
-              {
-                backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
-                borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
-              },
-              panMode && styles.activeControlButton,
+              styles.menuButton,
+              { backgroundColor: isDark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)" },
             ]}
-            onPress={() => setPanMode(!panMode)}
+            onPress={toggleSidebar}
+            pointerEvents="auto"
           >
-            <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
-              {panMode ? "✋" : "🔄"}
+            <Text style={[styles.menuButtonText, { color: isDark ? "white" : "black" }]}>
+              ☰
             </Text>
           </TouchableOpacity>
+
+          {/* Origin Toggle Button */}
           <TouchableOpacity
             style={[
-              styles.controlButton,
-              {
-                backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
-                borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
-              },
+              styles.originButton,
+              { backgroundColor: isDark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)" },
+              showOrigin && { backgroundColor: isDark ? "rgba(100, 150, 255, 0.4)" : "rgba(100, 150, 255, 0.3)" },
             ]}
-            onPress={() => handleZoom("in")}
+            onPress={() => setShowOrigin(!showOrigin)}
+            pointerEvents="auto"
           >
-            <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
-              +
+            <Text style={[styles.originButtonText, { color: isDark ? "white" : "black" }]}>
+              ⌖
             </Text>
           </TouchableOpacity>
+
+          {/* View Controls (Zoom & Pan) */}
+          <View style={styles.viewControls} pointerEvents="box-none">
+            <TouchableOpacity
+              style={[
+                styles.controlButton,
+                {
+                  backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
+                  borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
+                },
+                panMode && styles.activeControlButton,
+              ]}
+              onPress={() => setPanMode(!panMode)}
+              pointerEvents="auto"
+            >
+              <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
+                {panMode ? "✋" : "🔄"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.controlButton,
+                {
+                  backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
+                  borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
+                },
+              ]}
+              onPress={() => handleZoom("in")}
+              pointerEvents="auto"
+            >
+              <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
+                +
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.controlButton,
+                {
+                  backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
+                  borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
+                },
+              ]}
+              onPress={() => handleZoom("out")}
+              pointerEvents="auto"
+            >
+              <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
+                -
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Bottom Center Import Button */}
           <TouchableOpacity
-            style={[
-              styles.controlButton,
-              {
-                backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
-                borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
-              },
-            ]}
-            onPress={() => handleZoom("out")}
+            style={[styles.importButton, loading && styles.importButtonLoading]}
+            onPress={handleImport}
+            disabled={loading}
+            pointerEvents="auto"
           >
-            <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
-              -
-            </Text>
+            {loading ? (
+              <View style={styles.progressContainer}>
+                <View style={[styles.progressBar, { width: `${loadingProgress}%` }]} />
+                <Text style={styles.progressText}>{Math.round(loadingProgress)}%</Text>
+              </View>
+            ) : (
+              <Text style={styles.importButtonText}>Import</Text>
+            )}
           </TouchableOpacity>
         </View>
-
-        {/* Bottom Center Import Button */}
-        <TouchableOpacity
-          style={[styles.importButton, loading && styles.importButtonLoading]}
-          onPress={handleImport}
-          disabled={loading}
-        >
-          {loading ? (
-            <View style={styles.progressContainer}>
-              <View style={[styles.progressBar, { width: `${loadingProgress}%` }]} />
-              <Text style={styles.progressText}>{Math.round(loadingProgress)}%</Text>
-            </View>
-          ) : (
-            <Text style={styles.importButtonText}>Import</Text>
-          )}
-        </TouchableOpacity>
       </View>
 
       {/* Overlay to close sidebar on outside tap */}
@@ -439,6 +531,15 @@ const styles = StyleSheet.create({
   viewerContainer: {
     flex: 1,
     position: "relative",
+    backgroundColor: "#f5f5f5", // Match StepLoader theme
+  },
+  uiOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 20, // Above WebView, below sidebar
   },
   menuButton: {
     position: "absolute",
