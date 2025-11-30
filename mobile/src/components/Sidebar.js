@@ -24,11 +24,14 @@ const Sidebar = ({
     onCycleViewMode,
     showGrid,
     onToggleGrid,
-    showViewSelector,
-    onToggleViewSelector,
     onResetPosition,
+    fileName = "Main Assembly", // New prop with default value
+    onDeleteAll, // New prop for deleting entire assembly
+    onExport, // New prop for exporting 3D models
+    onShowFileInfo, // New prop for showing file information
 }) => {
     const [showColorPicker, setShowColorPicker] = useState(false);
+    const [isExpanded, setIsExpanded] = useState(true); // Tree state
 
     const isDark = theme === "dark";
     const textColor = isDark ? "white" : "black";
@@ -60,6 +63,14 @@ const Sidebar = ({
         Alert.alert("Export BOM", "BOM Export functionality coming soon!");
     };
 
+    // Toggle all parts visibility
+    const handleToggleAllVisibility = () => {
+        const allVisible = objects.every(obj => obj.visible);
+        objects.forEach(obj => {
+            onUpdateObject(obj.id, { visible: !allVisible });
+        });
+    };
+
     const PRESET_COLORS = [
         "#ef4444", // Red
         "#f97316", // Orange
@@ -74,6 +85,8 @@ const Sidebar = ({
         "#1f2937", // Dark Gray
         "#000000", // Black
     ];
+
+    const allVisible = objects.length > 0 && objects.every(obj => obj.visible);
 
     return (
         <View style={[styles.container, { backgroundColor: isDark ? "#222" : "#fff" }]}>
@@ -125,18 +138,19 @@ const Sidebar = ({
                     />
                 </TouchableOpacity>
 
+                {/* Replace the View Selector button with File Info */}
                 <TouchableOpacity
                     style={[
                         styles.topButton,
-                        { backgroundColor: showViewSelector ? activeItemBg : itemBg, borderColor: showViewSelector ? activeIconColor : "transparent", borderWidth: 1 }
+                        { backgroundColor: itemBg, borderColor: "transparent", borderWidth: 1 }
                     ]}
-                    onPress={onToggleViewSelector}
+                    onPress={onShowFileInfo}
                     activeOpacity={0.7}
                 >
                     <Ionicons
-                        name="compass-outline"
+                        name="information-circle-outline"
                         size={20}
-                        color={showViewSelector ? activeIconColor : textColor}
+                        color={textColor}
                     />
                 </TouchableOpacity>
 
@@ -160,68 +174,118 @@ const Sidebar = ({
 
             {/* Parts List Header */}
             <View style={[styles.tableHeader, { borderBottomColor: borderColor }]}>
-                <Text style={[styles.headerText, { color: textColor, flex: 0.12 }]}>#</Text>
-                <Text style={[styles.headerText, { color: textColor, flex: 0.43 }]}>Parts list</Text>
-                <Text style={[styles.headerText, { color: textColor, flex: 0.13 }]}>Vis</Text>
-                <Text style={[styles.headerText, { color: textColor, flex: 0.13 }]}>Rst</Text>
-                <Text style={[styles.headerText, { color: textColor, flex: 0.13 }]}>Del</Text>
+                <Text style={[styles.headerText, { color: textColor, flex: 1 }]}>Feature Tree</Text>
             </View>
 
-            {/* Parts List Content */}
+            {/* Parts List Content - SolidWorks Style Tree */}
             <ScrollView style={styles.content}>
-                {objects.map((obj, idx) => (
-                    <View
-                        key={obj.id}
-                        style={[
-                            styles.tableRow,
-                            {
-                                borderBottomColor: borderColor,
-                                backgroundColor: obj.id === selectedId ? (isDark ? "#3b82f6" : "#bfdbfe") : "transparent"
-                            }
-                        ]}
-                    >
-                        <Text style={[styles.rowText, { color: textColor, flex: 0.12 }]}>{idx + 1}</Text>
-                        <TouchableOpacity
-                            style={{ flex: 0.43 }}
-                            onPress={() => onSelect(obj.id)}
+                {objects.length > 0 ? (
+                    <>
+                        {/* Parent Assembly Row */}
+                        <View
+                            style={[
+                                styles.parentRow,
+                                { borderBottomColor: borderColor, backgroundColor: itemBg }
+                            ]}
                         >
-                            <Text style={[styles.rowText, { color: textColor }]} numberOfLines={1}>
-                                {obj.name}
-                            </Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            style={{ flex: 0.13, alignItems: "center" }}
-                            onPress={() => onUpdateObject(obj.id, { visible: !obj.visible })}
-                        >
-                            <Ionicons
-                                name={obj.visible ? "eye-outline" : "eye-off-outline"}
-                                size={18}
-                                color={textColor}
-                            />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            style={{ flex: 0.13, alignItems: "center" }}
-                            onPress={() => onResetPosition(obj.id)}
-                        >
-                            <Ionicons
-                                name="refresh-outline"
-                                size={18}
-                                color={textColor}
-                            />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            style={{ flex: 0.13, alignItems: "center" }}
-                            onPress={() => onDeleteObject(obj.id)}
-                        >
-                            <Ionicons
-                                name="trash-outline"
-                                size={18}
-                                color="#ef4444"
-                            />
-                        </TouchableOpacity>
-                    </View>
-                ))}
-                {objects.length === 0 && (
+                            <TouchableOpacity
+                                style={styles.parentRowContent}
+                                onPress={() => setIsExpanded(!isExpanded)}
+                                activeOpacity={0.7}
+                            >
+                                <Ionicons
+                                    name={isExpanded ? "chevron-down" : "chevron-forward"}
+                                    size={18}
+                                    color={textColor}
+                                    style={styles.chevronIcon}
+                                />
+                                <Ionicons
+                                    name="cube-outline"
+                                    size={18}
+                                    color={activeIconColor}
+                                    style={styles.assemblyIcon}
+                                />
+                                <Text style={[styles.parentText, { color: textColor }]} numberOfLines={1}>
+                                    {fileName}
+                                </Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={styles.globalVisibilityButton}
+                                onPress={handleToggleAllVisibility}
+                            >
+                                <Ionicons
+                                    name={allVisible ? "eye-outline" : "eye-off-outline"}
+                                    size={18}
+                                    color={textColor}
+                                />
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={styles.deleteAllButton}
+                                onPress={onDeleteAll}
+                            >
+                                <Ionicons
+                                    name="trash-outline"
+                                    size={18}
+                                    color="#ef4444"
+                                />
+                            </TouchableOpacity>
+                        </View>
+
+                        {/* Child Parts - Indented */}
+                        {isExpanded && objects.map((obj, idx) => (
+                            <View
+                                key={obj.id}
+                                style={[
+                                    styles.childRow,
+                                    {
+                                        borderBottomColor: borderColor,
+                                        backgroundColor: obj.id === selectedId ? (isDark ? "#3b82f6" : "#bfdbfe") : "transparent"
+                                    }
+                                ]}
+                            >
+                                <Text style={[styles.childIndex, { color: textColor }]}>{idx + 1}</Text>
+                                <TouchableOpacity
+                                    style={styles.childNameContainer}
+                                    onPress={() => onSelect(obj.id)}
+                                >
+                                    <Text style={[styles.childText, { color: textColor }]} numberOfLines={1}>
+                                        {obj.name}
+                                    </Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.iconButton}
+                                    onPress={() => onUpdateObject(obj.id, { visible: !obj.visible })}
+                                >
+                                    <Ionicons
+                                        name={obj.visible ? "eye-outline" : "eye-off-outline"}
+                                        size={16}
+                                        color={textColor}
+                                    />
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.iconButton}
+                                    onPress={() => onResetPosition(obj.id)}
+                                >
+                                    <Ionicons
+                                        name="refresh-outline"
+                                        size={16}
+                                        color={textColor}
+                                    />
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.iconButton}
+                                    onPress={() => onDeleteObject(obj.id)}
+                                >
+                                    <Ionicons
+                                        name="trash-outline"
+                                        size={16}
+                                        color="#ef4444"
+                                    />
+                                </TouchableOpacity>
+                            </View>
+                        ))}
+                    </>
+                ) : (
                     <Text style={{ color: subTextColor, textAlign: "center", marginTop: 20 }}>
                         No parts loaded
                     </Text>
@@ -235,6 +299,15 @@ const Sidebar = ({
                     onPress={toggleTheme}
                 >
                     <Ionicons name={isDark ? "moon-outline" : "sunny-outline"} size={20} color={textColor} />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                    style={[styles.exportButton, { backgroundColor: itemBg }]}
+                    onPress={onExport}
+                    disabled={objects.length === 0}
+                >
+                    <Ionicons name="share-social-outline" size={18} color={objects.length === 0 ? subTextColor : activeIconColor} style={{ marginRight: 6 }} />
+                    <Text style={[styles.exportText, { color: objects.length === 0 ? subTextColor : textColor }]}>Export File</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -324,6 +397,7 @@ const styles = StyleSheet.create({
         height: 40,
         marginLeft: 15,
         borderRadius: 8,
+        flexDirection: 'row',
         justifyContent: "center",
         alignItems: "center",
         borderWidth: 1,
@@ -331,6 +405,66 @@ const styles = StyleSheet.create({
     },
     exportText: {
         fontWeight: "bold",
+    },
+    // SolidWorks-style tree styles
+    parentRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        paddingVertical: 12,
+        paddingHorizontal: 8,
+        borderBottomWidth: 1,
+        marginBottom: 2,
+    },
+    parentRowContent: {
+        flex: 1,
+        flexDirection: "row",
+        alignItems: "center",
+    },
+    chevronIcon: {
+        marginRight: 5,
+    },
+    assemblyIcon: {
+        marginRight: 8,
+    },
+    parentText: {
+        fontSize: 15,
+        fontWeight: "600",
+        flex: 1,
+    },
+    globalVisibilityButton: {
+        padding: 8,
+        marginLeft: 8,
+    },
+    deleteAllButton: {
+        padding: 8,
+        marginLeft: 4,
+    },
+    childRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        paddingVertical: 10,
+        paddingLeft: 35, // Indent children
+        paddingRight: 8,
+        borderBottomWidth: 1,
+    },
+    childIndex: {
+        fontSize: 12,
+        width: 25,
+        color: "#888",
+    },
+    childNameContainer: {
+        flex: 1,
+        marginRight: 8,
+    },
+    childText: {
+        fontSize: 14,
+    },
+    iconButton: {
+        padding: 4,
+        marginLeft: 6,
+        alignItems: "center",
+        justifyContent: "center",
+        width: 28,
     },
 });
 

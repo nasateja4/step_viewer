@@ -11,10 +11,14 @@ import {
   Platform,
   Animated,
   Dimensions,
+  Modal,
+  TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
+import JSZip from "jszip";
 import { Asset } from "expo-asset";
 import MinimalViewer from "./src/components/MinimalViewer";
 import Sidebar from "./src/components/Sidebar";
@@ -36,7 +40,17 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [assetsLoaded, setAssetsLoaded] = useState(false);
+  const [importBtnActive, setImportBtnActive] = useState(false);
+  const [currentFileName, setCurrentFileName] = useState("No File Loaded");
   const stepLoaderRef = React.useRef(null);
+  const [fileSize, setFileSize] = useState(0);
+  const [fileMetadata, setFileMetadata] = useState({
+    schema: 'N/A',
+    created: 'N/A',
+    software: 'N/A',
+    author: 'N/A',
+    organization: 'N/A'
+  });
 
   // Step Loader State
   const [stepFileContent, setStepFileContent] = useState(null);
@@ -54,10 +68,93 @@ export default function App() {
   const [orbitControlsCode, setOrbitControlsCode] = useState('');
   const [occtWasmBase64, setOcctWasmBase64] = useState('');
 
+  // Export Wizard State
+  const [exportModalVisible, setExportModalVisible] = useState(false);
+  const [exportStage, setExportStage] = useState('format'); // 'format' | 'mode' | 'name' | 'processing'
+  const [selectedFormat, setSelectedFormat] = useState('stl');
+  const [exportMode, setExportMode] = useState('merged');
+  const [exportName, setExportName] = useState('');
+  const [exportProgress, setExportProgress] = useState(0);
+
   // Load assets on mount
   useEffect(() => {
     loadAssets();
   }, []);
+
+  const parseFileMetadata = (base64Data, fileName) => {
+    const name = fileName.toLowerCase();
+    let meta = { schema: 'N/A', created: 'N/A', software: 'N/A', author: 'N/A', organization: 'N/A' };
+
+    try {
+      const decoded = atob(base64Data.substring(0, 5000)); // Decode first 3-4KB
+
+      // === HANDLE STEP/IGES ===
+      if (name.endsWith('.step') || name.endsWith('.stp') || name.endsWith('.iges') || name.endsWith('.igs')) {
+        // 1. Extract Schema (AP203/AP214)
+        // Looks like: FILE_SCHEMA (('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+        const schemaMatch = decoded.match(/FILE_SCHEMA\s*\(\s*\(\s*'([^']+)/);
+        if (schemaMatch) {
+          meta.schema = schemaMatch[1];
+          if (meta.schema.includes('AUTOMOTIVE_DESIGN')) meta.schema = 'AP214 (Automotive)';
+          if (meta.schema.includes('CONFIG_CONTROL_DESIGN')) meta.schema = 'AP203 (Config Control)';
+        }
+
+        // 2. Extract FILE_NAME data
+        // Matches FILE_NAME(...); across multiple lines using [^;]+
+        const fileNameMatch = decoded.match(/FILE_NAME\s*\(([^;]+)\);/);
+
+        if (fileNameMatch) {
+          // Remove newlines and extra spaces to make splitting easier
+          const rawContent = fileNameMatch[1].replace(/\n/g, '').replace(/\r/g, '');
+
+          // Split by comma, but be careful of commas inside nested parens (basic implementation)
+          const parts = rawContent.split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
+
+          // ISO 10303-21 Standard:
+          // [0] Name, [1] Timestamp, [2] Author, [3] Organization, [4] Preprocessor, [5] Originating System
+
+          if (parts[1]) meta.created = parts[1]; // Timestamp
+          if (parts[2] && parts[2] !== "''") meta.author = parts[2].replace(/[()]/g, ''); // Author
+          if (parts[3] && parts[3] !== "''") meta.organization = parts[3].replace(/[()]/g, ''); // Organization
+
+          // Prioritize "Originating System" (SolidWorks) over "Preprocessor" (SwSTEP)
+          // If index 5 exists and isn't empty, use it. Otherwise use index 4.
+          if (parts[5] && parts[5] !== "''") {
+            meta.software = parts[5];
+          } else if (parts[4]) {
+            meta.software = parts[4];
+          }
+        }
+      }
+
+      // === HANDLE GLTF/GLB ===
+      else if (name.endsWith('.gltf') || name.endsWith('.glb')) {
+        // Find the start of the JSON object
+        const jsonStart = decoded.indexOf('{');
+        if (jsonStart !== -1) {
+          // Heuristic: Extract enough characters to hopefully cover the "asset" block
+          // (We don't parse the whole file to avoid memory spikes on 50MB files)
+          const chunk = decoded.substring(jsonStart, jsonStart + 1000) + "}";
+
+          // Use Regex to find "asset" block safely without parsing invalid JSON
+          // Pattern: "asset" : { ... }
+          // We look for keys manually to be safe
+          const generatorMatch = chunk.match(/"generator"\s*:\s*"([^"]+)"/);
+          const versionMatch = chunk.match(/"version"\s*:\s*"([^"]+)"/);
+          const copyrightMatch = chunk.match(/"copyright"\s*:\s*"([^"]+)"/);
+
+          meta.software = generatorMatch ? generatorMatch[1] : 'Unknown';
+          meta.schema = versionMatch ? `glTF ${versionMatch[1]}` : 'glTF 2.0';
+          meta.author = copyrightMatch ? copyrightMatch[1] : 'N/A';
+          meta.created = 'Not specified in standard';
+        }
+      }
+
+    } catch (e) {
+      console.log("Metadata parse error:", e);
+    }
+    return meta;
+  };
 
   const loadAssets = async () => {
     try {
@@ -117,6 +214,9 @@ export default function App() {
   };
 
   const handleImport = async () => {
+    // Wake up the button (make it fully visible)
+    setImportBtnActive(true);
+    setTimeout(() => setImportBtnActive(false), 3000);
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: "*/*",
@@ -126,6 +226,7 @@ export default function App() {
       if (result.canceled) return;
 
       const file = result.assets[0];
+      setFileSize(file.size);
       const fileName = file.name.toLowerCase();
 
       // Enhanced file type detection
@@ -155,7 +256,14 @@ export default function App() {
           console.log('📤 File (' + file.name + ') size:', base64.length);
 
           setLoadingProgress(30);
+
+          // Extract metadata for all supported file types
+          const meta = parseFileMetadata(base64, file.name);
+          setFileMetadata(meta);
+          console.log('📋 Metadata extracted:', meta);
+
           setStepFileName(file.name);
+          setCurrentFileName(file.name);
           setStepFileContent(base64);
           setLoadingProgress(60);
 
@@ -230,10 +338,13 @@ export default function App() {
       setLoadingProgress(100);
       setLoading(false);
       setLoadingProgress(0);
+
+      // ✅ CRITICAL: Reset file content to free RAM and allow re-loading
+      // This triggers React's useEffect on next import (state change: null → content)
+      setStepFileContent(null);
+      setStepFileName(null);
+      console.log('🧹 State reset - ready for next file');
     }, 300);
-    // DO NOT RESET CONTENT - Keep StepLoader mounted!
-    // setStepFileContent(null); 
-    // setStepFileName(null);
   };
 
   const handleStepError = (error) => {
@@ -311,6 +422,141 @@ export default function App() {
     setSelectedId(null);
   };
 
+  const handleDeleteAll = () => {
+    // Clear all objects from state
+    setObjects([]);
+    setSelectedId(null);
+
+    // Clear file content
+    setStepFileContent(null);
+    setStepFileName(null);
+    setCurrentFileName("No File Loaded");
+
+    // Send message to WebView to clear scene
+    if (stepLoaderRef.current) {
+      // Clear all objects by sending remove message for each
+      objects.forEach(obj => {
+        stepLoaderRef.current.postMessage(JSON.stringify({
+          type: 'REMOVE_OBJECT',
+          id: obj.id
+        }));
+      });
+    }
+
+    console.log('🗑️ All assembly deleted and scene cleared');
+  };
+
+  const handleExportRequest = () => {
+    if (objects.length === 0) {
+      Alert.alert("No Model", "Please load a 3D model before exporting.");
+      return;
+    }
+
+    // Reset and open modal
+    setExportStage('format');
+    setSelectedFormat('stl');
+    setExportMode('merged');
+    const baseName = currentFileName.replace(/\.[^/.]+$/, "") || "model";
+    setExportName(baseName);
+    setExportProgress(0);
+    setExportModalVisible(true);
+  };
+
+  const handleExportStep1 = (format) => {
+    setSelectedFormat(format);
+    setExportStage('mode');
+  };
+
+  const handleExportStep2 = (mode) => {
+    setExportMode(mode);
+    setExportStage('name');
+  };
+
+  const handleExportStep3 = () => {
+    if (!exportName.trim()) {
+      Alert.alert("Invalid Name", "Please enter a filename.");
+      return;
+    }
+
+    setExportStage('processing');
+    setExportProgress(0.1);
+
+    // Send export request to WebView
+    if (stepLoaderRef.current) {
+      stepLoaderRef.current.postMessage(JSON.stringify({
+        type: 'EXPORT_MODEL',
+        format: selectedFormat,
+        mode: exportMode
+      }));
+      console.log(`📤 Export requested: ${selectedFormat.toUpperCase()}, mode: ${exportMode}`);
+    }
+  };
+
+  const handleExportData = async (data) => {
+    try {
+      setExportProgress(0.5);
+
+      if (data.mode === 'merged') {
+        // Single file export
+        const extension = data.format || selectedFormat;
+        const fileName = exportName + "." + extension;
+        const filePath = FileSystem.cacheDirectory + fileName;
+
+        setExportProgress(0.7);
+        await FileSystem.writeAsStringAsync(filePath, data.data, {
+          encoding: FileSystem.EncodingType.UTF8
+        });
+
+        setExportProgress(0.9);
+        await Sharing.shareAsync(filePath, {
+          mimeType: extension === 'obj' ? 'model/obj' : 'application/sla',
+          dialogTitle: `Export ${extension.toUpperCase()} File`
+        });
+
+        console.log(`✅ ${extension.toUpperCase()} exported:`, fileName);
+      } else if (data.mode === 'individual') {
+        // Multiple files in ZIP
+        const zip = new JSZip();
+
+        setExportProgress(0.6);
+        data.payload.forEach(part => {
+          const extension = data.format || selectedFormat;
+          zip.file(part.name + "." + extension, part.data);
+        });
+
+        setExportProgress(0.8);
+        const content = await zip.generateAsync({ type: 'base64' });
+        const zipFileName = exportName + "_parts.zip";
+        const zipPath = FileSystem.cacheDirectory + zipFileName;
+
+        await FileSystem.writeAsStringAsync(zipPath, content, {
+          encoding: FileSystem.EncodingType.Base64
+        });
+
+        setExportProgress(0.95);
+        await Sharing.shareAsync(zipPath, {
+          mimeType: 'application/zip',
+          dialogTitle: 'Export Parts ZIP'
+        });
+
+        console.log(`✅ ZIP exported: ${zipFileName} (${data.payload.length} parts)`);
+      }
+
+      // Success - close modal
+      setExportProgress(1.0);
+      setTimeout(() => {
+        setExportModalVisible(false);
+        setExportStage('format');
+      }, 500);
+
+    } catch (error) {
+      console.error('Export error:', error);
+      Alert.alert('Export Failed', error.message);
+      setExportModalVisible(false);
+      setExportStage('format');
+    }
+  };
+
   const handleDeleteObject = (id) => {
     // Send message to WebView to remove object
     if (stepLoaderRef.current) {
@@ -341,6 +587,30 @@ export default function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [showViewSelector, setShowViewSelector] = useState(false);
   const [showOrigin, setShowOrigin] = useState(false);
+
+  const handleShowFileInfo = () => {
+    if (!currentFileName || currentFileName === "No File Loaded") {
+      Alert.alert("File Information", "No file is currently loaded.");
+      return;
+    }
+
+    const sizeInKB = (fileSize / 1024).toFixed(2);
+    const sizeInMB = (sizeInKB / 1024).toFixed(2);
+    const sizeString = sizeInMB > 1 ? `${sizeInMB} MB` : `${sizeInKB} KB`;
+
+    const infoString =
+      `Name: ${currentFileName}\n` +
+      `Type: ${stepFileType.toUpperCase()}\n` +
+      `Size: ${sizeString}\n` +
+      `Parts: ${objects.length}\n` +
+      `----------------\n` +
+      `Protocol: ${fileMetadata.schema}\n` +
+      `Software: ${fileMetadata.software}\n` +
+      `Created: ${fileMetadata.created}\n` +
+      `Author: ${fileMetadata.author}`;
+
+    Alert.alert("File Information", infoString, [{ text: "OK" }]);
+  };
 
   const handleCycleViewMode = () => {
     setViewMode((prevMode) => {
@@ -397,17 +667,14 @@ export default function App() {
     setIsSidebarOpen(!isSidebarOpen);
   };
 
-  const [panMode, setPanMode] = useState(false);
-  const [zoomCmd, setZoomCmd] = useState(null);
+
   const [theme, setTheme] = useState("light");
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   };
 
-  const handleZoom = (type) => {
-    setZoomCmd({ type, timestamp: Date.now() });
-  };
+
 
   const isDark = theme === "dark";
   const bgColor = isDark ? "#1a1a1a" : "#f0f0f0";
@@ -435,6 +702,7 @@ export default function App() {
             occtWasmBase64={occtWasmBase64}
             onModelLoaded={handleStepLoaded}
             onError={handleStepError}
+            onExportData={handleExportData}
           />
         ) : (
           <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -474,59 +742,17 @@ export default function App() {
             </Text>
           </TouchableOpacity>
 
-          {/* View Controls (Zoom & Pan) */}
-          <View style={styles.viewControls} pointerEvents="box-none">
-            <TouchableOpacity
-              style={[
-                styles.controlButton,
-                {
-                  backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
-                  borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
-                },
-                panMode && styles.activeControlButton,
-              ]}
-              onPress={() => setPanMode(!panMode)}
-              pointerEvents="auto"
-            >
-              <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
-                {panMode ? "✋" : "🔄"}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.controlButton,
-                {
-                  backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
-                  borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
-                },
-              ]}
-              onPress={() => handleZoom("in")}
-              pointerEvents="auto"
-            >
-              <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
-                +
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.controlButton,
-                {
-                  backgroundColor: isDark ? "rgba(255, 255, 255, 0.2)" : "rgba(0, 0, 0, 0.1)",
-                  borderColor: isDark ? "rgba(255, 255, 255, 0.3)" : "rgba(0, 0, 0, 0.2)",
-                },
-              ]}
-              onPress={() => handleZoom("out")}
-              pointerEvents="auto"
-            >
-              <Text style={[styles.controlButtonText, { color: isDark ? "white" : "black" }]}>
-                -
-              </Text>
-            </TouchableOpacity>
-          </View>
+
 
           {/* Bottom Center Import Button */}
           <TouchableOpacity
-            style={[styles.importButton, loading && styles.importButtonLoading]}
+            style={[
+              styles.importButton,
+              loading && styles.importButtonLoading,
+              {
+                opacity: (objects.length > 0 && !importBtnActive) ? 0.3 : 1
+              }
+            ]}
             onPress={handleImport}
             disabled={loading}
             pointerEvents="auto"
@@ -601,11 +827,148 @@ export default function App() {
               }));
             }
           }}
-          showViewSelector={showViewSelector}
-          onToggleViewSelector={() => setShowViewSelector(!showViewSelector)}
           onResetPosition={handleResetPosition}
+          fileName={currentFileName}
+          onDeleteAll={handleDeleteAll}
+          onExport={handleExportRequest}
+          onShowFileInfo={handleShowFileInfo}
         />
       </Animated.View>
+
+      {/* Export Wizard Modal */}
+      <Modal
+        visible={exportModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          if (exportStage !== 'processing') {
+            setExportModalVisible(false);
+            setExportStage('format');
+          }
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, { backgroundColor: isDark ? "#2a2a2a" : "#ffffff" }]}>
+            {/* Stage: Format Selection */}
+            {exportStage === 'format' && (
+              <>
+                <Text style={[styles.modalTitle, { color: isDark ? "#fff" : "#000" }]}>
+                  Choose Export Format
+                </Text>
+                <TouchableOpacity
+                  style={styles.wizardButton}
+                  onPress={() => handleExportStep1('stl')}
+                >
+                  <Text style={styles.wizardButtonText}>📐 STL (3D Print)</Text>
+                  <Text style={styles.wizardButtonSubtext}>Standard format for 3D printing</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.wizardButton}
+                  onPress={() => handleExportStep1('obj')}
+                >
+                  <Text style={styles.wizardButtonText}>🎨 OBJ (Standard)</Text>
+                  <Text style={styles.wizardButtonSubtext}>Universal 3D model format</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.wizardCancelButton}
+                  onPress={() => {
+                    setExportModalVisible(false);
+                    setExportStage('format');
+                  }}
+                >
+                  <Text style={styles.wizardCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {/* Stage: Mode Selection */}
+            {exportStage === 'mode' && (
+              <>
+                <Text style={[styles.modalTitle, { color: isDark ? "#fff" : "#000" }]}>
+                  Export Mode
+                </Text>
+                <TouchableOpacity
+                  style={styles.wizardButton}
+                  onPress={() => handleExportStep2('merged')}
+                >
+                  <Text style={styles.wizardButtonText}>🔗 Single Body (Merged)</Text>
+                  <Text style={styles.wizardButtonSubtext}>One combined file</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.wizardButton}
+                  onPress={() => handleExportStep2('individual')}
+                >
+                  <Text style={styles.wizardButtonText}>📦 Individual Parts (ZIP)</Text>
+                  <Text style={styles.wizardButtonSubtext}>Separate files in archive</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.wizardCancelButton}
+                  onPress={() => setExportStage('format')}
+                >
+                  <Text style={styles.wizardCancelText}>Back</Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {/* Stage: Filename Input */}
+            {exportStage === 'name' && (
+              <>
+                <Text style={[styles.modalTitle, { color: isDark ? "#fff" : "#000" }]}>
+                  Enter Filename
+                </Text>
+                <TextInput
+                  style={[
+                    styles.filenameInput,
+                    {
+                      backgroundColor: isDark ? "#1a1a1a" : "#f5f5f5",
+                      color: isDark ? "#fff" : "#000",
+                      borderColor: isDark ? "#444" : "#ddd"
+                    }
+                  ]}
+                  value={exportName}
+                  onChangeText={setExportName}
+                  placeholder="Enter filename..."
+                  placeholderTextColor={isDark ? "#888" : "#999"}
+                  autoFocus={true}
+                />
+                <Text style={[styles.filenameHint, { color: isDark ? "#888" : "#666" }]}>
+                  Extension (.{selectedFormat}) will be added automatically
+                </Text>
+                <View style={styles.wizardButtonRow}>
+                  <TouchableOpacity
+                    style={[styles.wizardButton, { flex: 1, marginRight: 10 }]}
+                    onPress={handleExportStep3}
+                  >
+                    <Text style={styles.wizardButtonText}>✓ Export</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.wizardCancelButton, { flex: 1 }]}
+                    onPress={() => setExportStage('mode')}
+                  >
+                    <Text style={styles.wizardCancelText}>Back</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+
+            {/* Stage: Processing */}
+            {exportStage === 'processing' && (
+              <>
+                <Text style={[styles.modalTitle, { color: isDark ? "#fff" : "#000" }]}>
+                  Exporting Model...
+                </Text>
+                <ActivityIndicator size="large" color="#3b82f6" style={{ marginVertical: 30 }} />
+                <View style={styles.progressBarContainer}>
+                  <View style={[styles.progressBarFill, { width: `${exportProgress * 100}%` }]} />
+                </View>
+                <Text style={[styles.progressText, { color: isDark ? "#888" : "#666" }]}>
+                  {Math.round(exportProgress * 100)}%
+                </Text>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView >
   );
 }
@@ -671,54 +1034,53 @@ const styles = StyleSheet.create({
   canvasContainer: {
     flex: 1,
   },
-  viewControls: {
-    position: "absolute",
-    bottom: 40,
-    right: 20,
-    flexDirection: "row",
-    gap: 8,
-    zIndex: 20,
-  },
-  controlButton: {
-    width: 40,
-    height: 40,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    borderRadius: 10,
-    justifyContent: "center",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.3)",
-  },
-  activeControlButton: {
-    backgroundColor: "#3b82f6",
-    borderColor: "#3b82f6",
-  },
-  controlButtonText: {
-    color: "white",
-    fontSize: 24,
-    fontWeight: "bold",
-  },
+
   importButton: {
     position: "absolute",
-    bottom: 40,
+    bottom: 20,
     alignSelf: "center",
-    marginLeft: -60,
-    backgroundColor: "#fef08a", // Light yellow accent
+    backgroundColor: "#2196F3", // Modern blue color
     paddingHorizontal: 30,
-    paddingVertical: 12,
-    borderRadius: 25,
-    elevation: 5,
-    zIndex: 10,
-    minWidth: 120,
+    paddingVertical: 15,
+    borderRadius: 50,
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    zIndex: 100,
+    minWidth: 140,
     alignItems: "center",
+    justifyContent: "center",
   },
   importButtonLoading: {
     opacity: 0.8,
   },
   importButtonText: {
-    color: "#000",
+    color: "#FFFFFF",
     fontWeight: "bold",
     fontSize: 16,
+  },
+  progressContainer: {
+    width: 120,
+    height: 30,
+    justifyContent: "center",
+    alignItems: "center",
+    position: "relative",
+  },
+  progressBar: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: "rgba(255, 255, 255, 0.3)",
+    borderRadius: 50,
+  },
+  progressText: {
+    color: "#FFFFFF",
+    fontWeight: "bold",
+    fontSize: 14,
+    zIndex: 1,
   },
   loadingOverlay: {
     position: "absolute",
@@ -768,5 +1130,103 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     borderRightWidth: 1,
     borderRightColor: "#333",
+  },
+  // Export Wizard Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalContainer: {
+    width: "85%",
+    maxWidth: 400,
+    borderRadius: 20,
+    padding: 30,
+    elevation: 10,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: "bold",
+    marginBottom: 25,
+    textAlign: "center",
+  },
+  wizardButton: {
+    backgroundColor: "#3b82f6",
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    marginBottom: 15,
+    elevation: 3,
+    shadowColor: "#3b82f6",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  wizardButtonText: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  wizardButtonSubtext: {
+    color: "#e0e7ff",
+    fontSize: 13,
+    textAlign: "center",
+    marginTop: 4,
+  },
+  wizardCancelButton: {
+    backgroundColor: "transparent",
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    marginTop: 5,
+    borderWidth: 1,
+    borderColor: "#888",
+  },
+  wizardCancelText: {
+    color: "#888",
+    fontSize: 15,
+    fontWeight: "500",
+    textAlign: "center",
+  },
+  wizardButtonRow: {
+    flexDirection: "row",
+    marginTop: 10,
+  },
+  filenameInput: {
+    fontSize: 16,
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 10,
+  },
+  filenameHint: {
+    fontSize: 13,
+    textAlign: "center",
+    marginBottom: 20,
+  },
+  progressBarContainer: {
+    width: "100%",
+    height: 8,
+    backgroundColor: "#e5e7eb",
+    borderRadius: 4,
+    overflow: "hidden",
+    marginVertical: 20,
+  },
+  progressBarFill: {
+    height: "100%",
+    backgroundColor: "#3b82f6",
+    borderRadius: 4,
+  },
+  progressText: {
+    fontSize: 14,
+    textAlign: "center",
+    fontWeight: "600",
   },
 });
